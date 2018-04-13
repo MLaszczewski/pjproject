@@ -152,7 +152,8 @@ enum pjmedia_transport_ice_options
      * are different after several packets are received.
      * Specifying this option will disable this feature.
      */
-    PJMEDIA_ICE_NO_SRC_ADDR_CHECKING = 1
+    PJMEDIA_ICE_NO_SRC_ADDR_CHECKING = 1,
+    PJMEDIA_ICE_RTCP_MUX = 0x1000
 };
 
 
