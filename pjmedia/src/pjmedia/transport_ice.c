@@ -1303,6 +1303,7 @@ static pj_status_t transport_media_create(pjmedia_transport *tp,
     return status;
 }
 
+static const pj_str_t ID_RTCPMUX = { "rtcp-mux", 8 };
 
 static pj_status_t transport_encode_sdp(pjmedia_transport *tp,
 				        pj_pool_t *sdp_pool,
@@ -1354,6 +1355,14 @@ static pj_status_t transport_encode_sdp(pjmedia_transport *tp,
 	    tp_ice->oa_role = ROLE_ANSWERER;
 	else
 	    tp_ice->oa_role = ROLE_OFFERER;
+    }
+    
+    if((tp_ice->options & PJMEDIA_ICE_RTCP_MUX) != 0) {
+        pjmedia_sdp_media *loc_m;
+        pjmedia_sdp_attr* a;
+        loc_m = sdp_local->media[media_index];
+        a = pjmedia_sdp_attr_create(sdp_pool, ID_RTCPMUX.ptr, NULL);
+        pjmedia_sdp_media_add_attr(loc_m, a);
     }
 
     return status;
@@ -1804,7 +1813,14 @@ static pj_status_t transport_send_rtcp2(pjmedia_transport *tp,
 	}
 	return pj_ice_strans_sendto(tp_ice->ice_st, 2, pkt, size, 
 				    addr, addr_len);
-    } else {
+    } else if((tp_ice->options & PJMEDIA_ICE_RTCP_MUX) != 0) {
+	if (addr == NULL) {
+	    addr = &tp_ice->remote_rtcp;
+	    addr_len = pj_sockaddr_get_len(addr);
+	}
+	return pj_ice_strans_sendto(tp_ice->ice_st, 1, pkt, size, 
+				    addr, addr_len);
+    } else {      
 	return PJ_SUCCESS;
     }
 }
@@ -1823,8 +1839,13 @@ static void ice_on_rx_data(pj_ice_strans *ice_st, unsigned comp_id,
 	/* Destroy on progress */
 	return;
     }
+    
+    unsigned char* data = (unsigned char*) pkt;
+    int type = (size >= 2) ? ((data[1]) & 0x7F) : 0;
+    int is_rtcp_type = type >= 64 && type < 96;
+    int rtcp_mux = (tp_ice->options & PJMEDIA_ICE_RTCP_MUX)!=0;
 
-    if (comp_id==1 && tp_ice->rtp_cb) {
+    if ((comp_id==1 && (!rtcp_mux || !is_rtcp_type)) && tp_ice->rtp_cb) {
 
 	/* Simulate packet lost on RX direction */
 	if (tp_ice->rx_drop_pct) {
@@ -1911,7 +1932,7 @@ static void ice_on_rx_data(pj_ice_strans *ice_st, unsigned comp_id,
 	if (!discard)
 	    (*tp_ice->rtp_cb)(tp_ice->stream, pkt, size);
 
-    } else if (comp_id==2 && tp_ice->rtcp_cb) {
+    } else if ((comp_id==2 || (is_rtcp_type && rtcp_mux)) && tp_ice->rtcp_cb) {
 
 	/* Check if RTCP source address is the same as the configured
 	 * remote address, and switch the address when they are
