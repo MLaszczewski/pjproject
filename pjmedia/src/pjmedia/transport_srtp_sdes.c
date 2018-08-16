@@ -122,7 +122,8 @@ static pj_status_t generate_crypto_attr_value(pj_pool_t *pool,
 			 PJ_ETOOSMALL);
 
 	do {
-#if defined(PJ_HAS_SSL_SOCK) && (PJ_HAS_SSL_SOCK != 0)
+#if defined(PJ_HAS_SSL_SOCK) && (PJ_HAS_SSL_SOCK != 0) && \
+    (PJ_SSL_SOCK_IMP == PJ_SSL_SOCK_IMP_OPENSSL)
 	    int err = RAND_bytes((unsigned char*)key,
 				 crypto_suites[cs_idx].cipher_key_len);
 	    if (err != 1) {
@@ -278,8 +279,7 @@ static pj_status_t sdes_media_create( pjmedia_transport *tp,
 
     /* Validations */
     if (srtp->offerer_side) {
-	if (srtp->setting.use == PJMEDIA_SRTP_DISABLED)
-	    srtp->bypass_srtp = PJ_TRUE;
+	/* As offerer: do nothing. */
     } else {
 	pjmedia_sdp_media *m_rem = sdp_remote->media[media_index];
 
