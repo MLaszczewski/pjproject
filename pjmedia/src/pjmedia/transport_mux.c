@@ -18,7 +18,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <pjmedia/transport_srtp.h>
+#include <pjmedia/transport_mux.h>
 #include <pjmedia/endpoint.h>
 #include <pjlib-util/base64.h>
 #include <pj/array.h>
