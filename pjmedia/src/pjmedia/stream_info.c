@@ -587,20 +587,20 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
 
     /* Check if "ssrc" attribute is present in the SDP. */
     for (i = 0; i < rem_m->attr_count; i++) {
-	if (pj_strcmp2(&rem_m->attr[i]->name, "ssrc") == 0) {
-	    pjmedia_sdp_ssrc_attr ssrc;
+		if (pj_strcmp2(&rem_m->attr[i]->name, "ssrc") == 0) {
+			pjmedia_sdp_ssrc_attr ssrc;
 
-	    status = pjmedia_sdp_attr_get_ssrc(
-	    		(const pjmedia_sdp_attr *)rem_m->attr[i], &ssrc);
-	    if (status == PJ_SUCCESS) {
-	        si->has_rem_ssrc = PJ_TRUE;
-	    	si->rem_ssrc = ssrc.ssrc;
-	    	if (ssrc.cname.slen > 0) {
-	    	    pj_strdup(pool, &si->rem_cname, &ssrc.cname);
-	    	    break;
-	    	}
-	    }
-	}
+			status = pjmedia_sdp_attr_get_ssrc(
+					(const pjmedia_sdp_attr *)rem_m->attr[i], &ssrc);
+			if (status == PJ_SUCCESS) {
+				si->has_rem_ssrc = PJ_TRUE;
+				si->rem_ssrc = ssrc.ssrc;
+				if (ssrc.cname.slen > 0) {
+					pj_strdup(pool, &si->rem_cname, &ssrc.cname);
+					break;
+				}
+			}
+		}
     }
 
     /* Get the payload number for receive channel. */
@@ -628,6 +628,24 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
 
     /* Leave SSRC to random. */
     si->ssrc = pj_rand();
+    
+        /* Check if "ssrc" attribute is present in the local SDP. */
+    for (i = 0; i < local_m->attr_count; i++) {
+		if (pj_strcmp2(&local_m->attr[i]->name, "ssrc") == 0) {
+			pjmedia_sdp_ssrc_attr ssrc;
+
+			status = pjmedia_sdp_attr_get_ssrc(
+					(const pjmedia_sdp_attr *)local_m->attr[i], &ssrc);
+			if (status == PJ_SUCCESS) {				
+				si->ssrc = ssrc.ssrc;
+				/*if (ssrc.cname.slen > 0) {
+					pj_strdup(pool, &si->cname, &ssrc.cname);
+					break;
+				}*/
+			}
+		}
+    }
+
 
     /* Set default jitter buffer parameter. */
     si->jb_init = si->jb_max = si->jb_min_pre = si->jb_max_pre = -1;

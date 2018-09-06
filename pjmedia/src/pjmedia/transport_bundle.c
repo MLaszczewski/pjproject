@@ -29,7 +29,16 @@
 #include <pj/os.h>
 #include <pj/pool.h>
 
+#if 0
+#   define TRACE_(x)	PJ_LOG(3,x)
+#else
+#   define TRACE_(x)	;
+#endif
+
 #define MAX_BUNDLE_STREAMS 16
+#define RTCP_BUFFER_SIZE 1024
+
+typedef struct transport_bundle transport_bundle;
 
 /* bundle transport endpoint */
 typedef struct transport_bundle_endpoint
@@ -51,6 +60,9 @@ typedef struct transport_bundle_endpoint
     /* Transport information */
     transport_bundle	*bundle; /**< Underlying transport.       */
     
+    char rtcp_buffer[RTCP_BUFFER_SIZE];
+    int rtcp_buffer_position;
+    
 } transport_bundle_endpoint;
 
 /* bundle transport */
@@ -64,10 +76,15 @@ typedef struct transport_bundle
     /* Transport information */
     pjmedia_transport	*member_tp; /**< Underlying transport.       */
     pj_bool_t		 member_tp_attached;
-    
+        
+    /* Protection from multiple calls of member functions */
+    pj_bool_t  media_created;
+    pj_bool_t  media_encoded;
+    pj_bool_t  media_started;    
+        
     /* Endpoints */
     transport_bundle_endpoint* endpoints[MAX_BUNDLE_STREAMS];
-        
+  
 } transport_bundle;
 
 /*
@@ -175,7 +192,7 @@ static pj_status_t transport_endpoint_simulate_lost(pjmedia_transport *tp,
 				       unsigned pct_lost);
 static pj_status_t transport_endpoint_destroy  (pjmedia_transport *tp);
 static pj_status_t transport_endpoint_attach2  (pjmedia_transport *tp,
-				       pjmedia_transport_attach_param *param);p
+				       pjmedia_transport_attach_param *param);
 				       
 static pjmedia_transport_op transport_bundle_endpoint_op =
 {
@@ -222,7 +239,7 @@ PJ_DEF(pj_status_t) pjmedia_transport_bundle_create(
 		bundle->endpoints[i] = NULL;
 	}
 
-    status = pj_lock_create_recursive_mutex(pool, pool->obj_name, &mux->mutex);
+    status = pj_lock_create_recursive_mutex(pool, pool->obj_name, &bundle->mutex);
     if (status != PJ_SUCCESS) {
 	  pj_pool_release(pool);
 	  return status;
@@ -250,8 +267,8 @@ static pj_status_t transport_send_rtp( pjmedia_transport *tp,
 				       const void *pkt,
 				       pj_size_t size)
 {
-    pj_status_t status;
-    transport_bundle *bundle = (transport_bundle*) tp;
+    transport_bundle *bundle = (transport_bundle*) tp;  
+    PJ_ASSERT_RETURN(tp, PJ_EINVAL);  
     return pjmedia_transport_send_rtp(bundle->member_tp, pkt, size);
 }
 
@@ -268,8 +285,8 @@ static pj_status_t transport_send_rtcp2(pjmedia_transport *tp,
 				        const void *pkt,
 				        pj_size_t size)
 {
-   pj_status_t status;
    transport_bundle *bundle = (transport_bundle*) tp;
+   PJ_ASSERT_RETURN(tp, PJ_EINVAL);
    return pjmedia_transport_send_rtcp(bundle->member_tp, pkt, size);
 }
 
@@ -286,8 +303,8 @@ static pj_status_t transport_simulate_lost(pjmedia_transport *tp,
 
 static pj_status_t transport_destroy  (pjmedia_transport *tp)
 {
-    transport_bundle *mux = (transport_bundle *) tp;
-    pj_status_t status;
+    transport_bundle *bundle = (transport_bundle *) tp;
+   // pj_status_t status;
     unsigned i;
 
     PJ_ASSERT_RETURN(tp, PJ_EINVAL);
@@ -297,11 +314,11 @@ static pj_status_t transport_destroy  (pjmedia_transport *tp)
 	}
 
     /* In case mutex is being acquired by other thread */
-    pj_lock_acquire(mux->mutex);
-    pj_lock_release(mux->mutex);
+    pj_lock_acquire(bundle->mutex);
+    pj_lock_release(bundle->mutex);
 
-    pj_lock_destroy(mux->mutex);
-    pj_pool_release(mux->pool);
+    pj_lock_destroy(bundle->mutex);
+    pj_pool_release(bundle->pool);
 
     return PJ_SUCCESS;
 }
@@ -311,11 +328,11 @@ static pj_status_t transport_destroy  (pjmedia_transport *tp)
  */
 static void bundle_rtp_cb( void *user_data, void *pkt, pj_ssize_t size)
 {
-    transport_mux *bundle = (transport_mux *) user_data;
+    transport_bundle *bundle = (transport_bundle *) user_data;
     int i;
     
     pjmedia_rtp_hdr* hdr = (pjmedia_rtp_hdr*)pkt;   
-    pj_uint32_t ssrc = hdr.ssrc;
+    pj_uint32_t ssrc = hdr->ssrc;
     
     for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
 		transport_bundle_endpoint* stream = bundle->endpoints[i];
@@ -326,17 +343,171 @@ static void bundle_rtp_cb( void *user_data, void *pkt, pj_ssize_t size)
     return;
 }
 
+#define RTCP_SR   200
+#define RTCP_RR   201
+#define RTCP_SDES 202
+#define RTCP_BYE  203
+#define RTCP_XR   207
+/* RTCP Feedbacks */
+#define RTCP_RTPFB	205
+#define RTCP_PSFB	206
+
+static void parse_rtcp_report(transport_bundle *bundle,
+			       const void *pkt,
+			       pj_size_t size) {
+					   
+	pjmedia_rtcp_common *common = (pjmedia_rtcp_common*) pkt;
+    pjmedia_rtcp_rr *rr = NULL;
+    //pjmedia_rtcp_sr *sr = NULL;
+    int i;
+
+    const void* p = pkt + sizeof(pjmedia_rtcp_common);
+    pj_size_t more = size - sizeof(pjmedia_rtcp_common);
+    
+    pjmedia_rtcp_common *stream_commons[MAX_BUNDLE_STREAMS];
+    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+		stream_commons[i] = NULL;
+	}
+    
+    if (common->pt == RTCP_SR) {	
+		//sr = (pjmedia_rtcp_sr*) p;		
+		p += sizeof(pjmedia_rtcp_sr);
+		more -= sizeof(pjmedia_rtcp_sr);
+		
+	    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+			transport_bundle_endpoint* stream = bundle->endpoints[i];
+			if(!stream) continue;
+			if(stream->ssrc == common->ssrc || stream->rem_ssrc == common->ssrc) {
+				if(!stream->rtcp_cb) continue;
+				stream_commons[i] = (pjmedia_rtcp_common*)(stream->rtcp_buffer + stream->rtcp_buffer_position);
+				if(stream->rtcp_buffer_position + sizeof(pjmedia_rtcp_common) + sizeof(pjmedia_rtcp_sr) > RTCP_BUFFER_SIZE) continue;
+				memcpy(stream_commons[i], common, sizeof(pjmedia_rtcp_common) + sizeof(pjmedia_rtcp_sr));
+				stream->rtcp_buffer_position += sizeof(pjmedia_rtcp_common) + sizeof(pjmedia_rtcp_sr);
+			} 
+		}	
+    } 
+    
+    if (common->pt == RTCP_RR || common->pt == RTCP_SR) {
+		for(int i = 0 ; i < common->count; i++) {
+			if(more < sizeof(pjmedia_rtcp_rr)) break;
+			rr = (pjmedia_rtcp_rr*) p;
+			p += sizeof(pjmedia_rtcp_rr);
+			more -= sizeof(pjmedia_rtcp_rr);	
+			
+			for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+				transport_bundle_endpoint* stream = bundle->endpoints[i];
+				if(!stream) continue;
+				if(stream->ssrc == rr->ssrc || stream->rem_ssrc == rr->ssrc) {
+					if(!stream->rtcp_cb) continue;
+					if(!stream_commons[i]) {
+						if(stream->rtcp_buffer_position + sizeof(pjmedia_rtcp_common) + sizeof(pjmedia_rtcp_rr) > RTCP_BUFFER_SIZE) continue;
+						stream_commons[i] = (pjmedia_rtcp_common*)(stream->rtcp_buffer + stream->rtcp_buffer_position);
+						memcpy(stream_commons[i], common, sizeof(pjmedia_rtcp_common));						
+					}
+					if(stream->rtcp_buffer_position + sizeof(pjmedia_rtcp_rr) > RTCP_BUFFER_SIZE) continue;										
+					memcpy(stream->rtcp_buffer + stream->rtcp_buffer_position, rr, sizeof(pjmedia_rtcp_rr));
+					stream->rtcp_buffer_position += sizeof(pjmedia_rtcp_rr);
+				} 
+			}	
+		}		
+	} 		   
+}
+
+static void parse_rtcp_sdes( transport_bundle *bundle,
+			       const void *pkt,
+			       pj_size_t size) {
+	int i;
+    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+	    transport_bundle_endpoint* stream = bundle->endpoints[i];
+		if(stream->rtcp_buffer_position + size > RTCP_BUFFER_SIZE) continue;
+		memcpy(stream->rtcp_buffer + stream->rtcp_buffer_position, pkt, size);
+		stream->rtcp_buffer_position += size;
+    }
+}
+
+static void parse_rtcp_bye( transport_bundle *bundle,
+			       const void *pkt,
+			       pj_size_t size) {
+	int i;
+	for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+	    transport_bundle_endpoint* stream = bundle->endpoints[i];
+		if(stream->rtcp_buffer_position + size > RTCP_BUFFER_SIZE) continue;
+		memcpy(stream->rtcp_buffer + stream->rtcp_buffer_position, pkt, size);
+		stream->rtcp_buffer_position += size;
+    }				   
+}
+
+static void parse_rtcp_fb( transport_bundle *bundle,
+			       const void *pkt,
+			       pj_size_t size) {
+	int i;
+	for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+	    transport_bundle_endpoint* stream = bundle->endpoints[i];
+		if(stream->rtcp_buffer_position + size > RTCP_BUFFER_SIZE) continue;
+		memcpy(stream->rtcp_buffer + stream->rtcp_buffer_position, pkt, size);
+		stream->rtcp_buffer_position += size;
+    }				   
+}
+
+
 /*
  * This callback is called by transport when incoming rtcp is received
  */
 static void bundle_rtcp_cb( void *user_data, void *pkt, pj_ssize_t size)
 {
-    transport_mux *bundle = (transport_mux *) user_data;   
+    transport_bundle *bundle = (transport_bundle *) user_data;   
+    int i;
     
+    pj_lock_acquire(bundle->mutex);
     
+    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+		transport_bundle_endpoint* stream = bundle->endpoints[i];
+		stream->rtcp_buffer_position = 0;
+	}
     
-    /// TODO parse RTCP packet and demux reports
-    /// Send to endpoints matching ssrc   
+    pj_uint8_t *p, *p_end;   
+
+    p = (pj_uint8_t*)pkt;
+    p_end = p + size;
+    while (p < p_end) {
+		pjmedia_rtcp_common *common = (pjmedia_rtcp_common*)p;
+		unsigned len;
+
+		len = (pj_ntohs((pj_uint16_t)common->length)+1) * 4;
+		switch(common->pt) {
+		case RTCP_SR:
+		case RTCP_RR:
+		case RTCP_XR:
+			parse_rtcp_report(bundle, p, len);
+			break;
+		case RTCP_SDES:
+			parse_rtcp_sdes(bundle, p, len);
+			break;
+		case RTCP_BYE:
+			parse_rtcp_bye(bundle, p, len);
+			break;
+		case RTCP_RTPFB:
+		case RTCP_PSFB:
+			parse_rtcp_fb(bundle, p, len);
+			break;
+		default:
+			/* Ignore unknown RTCP */
+			TRACE_((sess->name, "Received unknown RTCP packet type=%d",
+				common->pt));
+			break;
+		}
+
+		p += len;
+    }
+    
+    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+		transport_bundle_endpoint* stream = bundle->endpoints[i];		
+		if(stream->rtcp_buffer_position > 0) {
+			stream->rtcp_cb(stream->user_data, stream->rtcp_buffer, stream->rtcp_buffer_position);
+		}
+    }
+    
+    pj_lock_release(bundle->mutex);
     
     return;
 }
@@ -349,18 +520,19 @@ PJ_DECL(pj_status_t) pjmedia_transport_bundle_endpoint_create(
 				       pjmedia_transport **p_tpe) {
     pj_pool_t *pool;
     transport_bundle_endpoint *endpoint;
-    pj_status_t status;
     unsigned i;
 
     PJ_ASSERT_RETURN(tp && p_tpe, PJ_EINVAL);
     
     transport_bundle* bundle = (transport_bundle*)tp;
     
-    pool = bundle.pool;
+    pool = bundle->pool;
     
     endpoint = PJ_POOL_ZALLOC_T(pool, transport_bundle_endpoint);
 
     endpoint->bundle = bundle;
+    
+    endpoint->rtcp_buffer_position = 0;
     
     pj_lock_acquire(bundle->mutex);
     
@@ -369,6 +541,8 @@ PJ_DECL(pj_status_t) pjmedia_transport_bundle_endpoint_create(
 			bundle->endpoints[i] = endpoint;
 		}
 	}
+	
+	PJ_ASSERT_RETURN( i < MAX_BUNDLE_STREAMS, PJ_EINVAL);
 
     /* Initialize base pjmedia_transport */
     pj_memcpy(endpoint->base.name, pool->obj_name, PJ_MAX_OBJ_NAME);
@@ -376,13 +550,290 @@ PJ_DECL(pj_status_t) pjmedia_transport_bundle_endpoint_create(
 	  endpoint->base.type = tp->type;
     else
 	  endpoint->base.type = PJMEDIA_TRANSPORT_TYPE_UDP;
-    bundle->base.op = &transport_bundle_op;
+    bundle->base.op = &transport_bundle_endpoint_op;
 
     /* Done */
     *p_tpe = &bundle->base;
+    
+    pj_lock_release(bundle->mutex);
 
     return PJ_SUCCESS;
 }
 
+static pj_status_t transport_get_info(pjmedia_transport *tp,
+				      pjmedia_transport_info *info)
+{
+    transport_bundle *bundle = (transport_bundle*) tp;
+    return pjmedia_transport_get_info(bundle->member_tp, info);
+}
+
+static void transport_detach(pjmedia_transport *tp, void *strm)
+{
+    transport_bundle *bundle = (transport_bundle*) tp;
+
+    PJ_UNUSED_ARG(strm);
+    PJ_ASSERT_ON_FAIL(tp, return);
+
+    if (bundle->member_tp) {
+	  pjmedia_transport_detach(bundle->member_tp, bundle);
+	  bundle->member_tp_attached = PJ_FALSE;
+	  bundle->member_tp = NULL;
+    }
+}
+
+static pj_status_t transport_media_create(pjmedia_transport *tp,
+				          pj_pool_t *sdp_pool,
+					  unsigned options,
+				          const pjmedia_sdp_session *sdp_remote,
+					  unsigned media_index)
+{	
+    struct transport_bundle *bundle = (struct transport_bundle*) tp;
+    pj_status_t status;
+    status = pjmedia_transport_media_create(bundle->member_tp, sdp_pool,
+					    options, sdp_remote,
+					    media_index);		
+	bundle->media_created = PJ_TRUE;
+	return status;
+}
+
+
+static pj_status_t transport_encode_sdp(pjmedia_transport *tp,
+					pj_pool_t *sdp_pool,
+					pjmedia_sdp_session *sdp_local,
+					const pjmedia_sdp_session *sdp_remote,
+					unsigned media_index)
+{
+    
+    struct transport_bundle *bundle = (struct transport_bundle*) tp;
+    pj_status_t status;
+
+    PJ_ASSERT_RETURN(tp && sdp_pool && sdp_local, PJ_EINVAL);
+       
+    status = pjmedia_transport_encode_sdp(bundle->member_tp, sdp_pool,
+				  sdp_local, sdp_remote, media_index);
+
+	bundle->media_encoded = PJ_TRUE;
+	
+    return status;
+}
+
+
+static pj_status_t transport_media_start(pjmedia_transport *tp,
+				         pj_pool_t *pool,
+				         const pjmedia_sdp_session *sdp_local,
+				         const pjmedia_sdp_session *sdp_remote,
+				         unsigned media_index)
+{
+    struct transport_bundle *bundle = (struct transport_bundle*) tp;
+    pj_status_t status;
+
+    PJ_ASSERT_RETURN(tp && pool && sdp_local && sdp_remote, PJ_EINVAL);
+
+    status = pjmedia_transport_media_start(bundle->member_tp, pool,
+					   sdp_local, sdp_remote,
+				           media_index);    
+				           
+    bundle->media_started = PJ_TRUE;				           
+    return status;
+}
+
+static pj_status_t transport_media_stop(pjmedia_transport *tp)
+{
+    struct transport_bundle *bundle = (struct transport_bundle*) tp;
+    pj_status_t status;
+
+
+    PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+
+    /* Invoke media_stop() of member tp */
+    status = pjmedia_transport_media_stop(bundle->member_tp);
+    if (status != PJ_SUCCESS)
+	PJ_LOG(4, (bundle->pool->obj_name,
+		   "RTCP-bundle failed stop underlying media transport."));
+		   
+    bundle->media_started = PJ_FALSE;
+    		   
+    return status;
+}
+
+static pj_status_t transport_attach2(pjmedia_transport *tp,
+				     pjmedia_transport_attach_param *param)
+{
+    transport_bundle *bundle = (transport_bundle*) tp;
+    pjmedia_transport_attach_param member_param;
+    
+    pj_status_t status;
+
+    PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+
+    if(!bundle->member_tp_attached) return PJ_SUCCESS;
+    
+    /* Attach self to member transport */
+    member_param = *param;
+    member_param.user_data = bundle;
+    member_param.rtp_cb = &bundle_rtp_cb;
+    member_param.rtcp_cb = &bundle_rtcp_cb;
+    status = pjmedia_transport_attach2(bundle->member_tp, &member_param);
+
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, status);
+    
+    bundle->member_tp_attached = PJ_TRUE;
+    return PJ_SUCCESS;
+}
+
+static pj_status_t transport_endpoint_get_info(pjmedia_transport *tp,
+				      pjmedia_transport_info *info)
+{
+    transport_bundle_endpoint *endpoint = (transport_bundle_endpoint*) tp;
+    PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+    return transport_get_info((pjmedia_transport*)endpoint->bundle, info);
+}
+
+static void transport_endpoint_detach(pjmedia_transport *tp, void *strm)
+{
+    transport_bundle_endpoint *endpoint = (transport_bundle_endpoint*) tp;
+
+    PJ_UNUSED_ARG(strm);
+    PJ_ASSERT_ON_FAIL(tp, return);
+
+    transport_detach((pjmedia_transport*) endpoint->bundle, endpoint);	
+}
+
+static pj_status_t transport_endpoint_send_rtp( pjmedia_transport *tp,
+				       const void *pkt,
+				       pj_size_t size)
+{
+    transport_bundle_endpoint *endpoint = (transport_bundle_endpoint*) tp;  
+    PJ_ASSERT_RETURN(tp, PJ_EINVAL);  
+    return transport_send_rtp((pjmedia_transport*) endpoint->bundle, pkt, size);
+}
+
+static pj_status_t transport_endpoint_send_rtcp(pjmedia_transport *tp,
+				       const void *pkt,
+				       pj_size_t size)
+{
+    return transport_endpoint_send_rtcp2(tp, NULL, 0, pkt, size);
+}
+
+static pj_status_t transport_endpoint_send_rtcp2(pjmedia_transport *tp,
+				        const pj_sockaddr_t *addr,
+				        unsigned addr_len,
+				        const void *pkt,
+				        pj_size_t size)
+{
+   transport_bundle_endpoint *endpoint = (transport_bundle_endpoint*) tp;
+   PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+   return transport_send_rtcp((pjmedia_transport*) endpoint->bundle, pkt, size);
+}
+
+static pj_status_t transport_endpoint_simulate_lost(pjmedia_transport *tp,
+					   pjmedia_dir dir,
+					   unsigned pct_lost)
+{
+    transport_bundle_endpoint *endpoint = (transport_bundle_endpoint *) tp;
+
+    PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+
+    return transport_simulate_lost((pjmedia_transport*) endpoint->bundle, dir, pct_lost);
+}
+
+
+static pj_status_t transport_endpoint_media_create(pjmedia_transport *tp,
+				          pj_pool_t *sdp_pool,
+					  unsigned options,
+				          const pjmedia_sdp_session *sdp_remote,
+					  unsigned media_index)
+{	
+    struct transport_bundle_endpoint *endpoint = (struct transport_bundle_endpoint*) tp;
+    pj_status_t status;
+    status = transport_media_create((pjmedia_transport*) endpoint->bundle, sdp_pool,
+					    options, sdp_remote,
+					    media_index);		
+	return status;
+}
+
+
+static pj_status_t transport_endpoint_encode_sdp(pjmedia_transport *tp,
+					pj_pool_t *sdp_pool,
+					pjmedia_sdp_session *sdp_local,
+					const pjmedia_sdp_session *sdp_remote,
+					unsigned media_index)
+{
+    
+    struct transport_bundle_endpoint *endpoint = (struct transport_bundle_endpoint*) tp;
+    pj_status_t status;
+
+    PJ_ASSERT_RETURN(tp && sdp_pool && sdp_local, PJ_EINVAL);
+	
+	status = transport_encode_sdp((pjmedia_transport*) endpoint->bundle, sdp_pool,
+				  sdp_local, sdp_remote, media_index);
+	
+    return status;
+}
+
+
+static pj_status_t transport_endpoint_media_start(pjmedia_transport *tp,
+				         pj_pool_t *pool,
+				         const pjmedia_sdp_session *sdp_local,
+				         const pjmedia_sdp_session *sdp_remote,
+				         unsigned media_index)
+{
+    struct transport_bundle_endpoint *endpoint = (struct transport_bundle_endpoint*) tp;
+    pj_status_t status;
+
+    PJ_ASSERT_RETURN(tp && pool && sdp_local && sdp_remote, PJ_EINVAL);
+
+    status = transport_media_start((pjmedia_transport*) endpoint->bundle, pool,
+					   sdp_local, sdp_remote,
+				           media_index);    
+				          			           
+    return status;
+}
+
+static pj_status_t transport_endpoint_media_stop(pjmedia_transport *tp)
+{
+    struct transport_bundle_endpoint *endpoint = (struct transport_bundle_endpoint*) tp;
+    pj_status_t status;
+
+
+    PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+
+    /* Invoke media_stop() of member tp */
+    status = pjmedia_transport_media_stop((pjmedia_transport*) endpoint->bundle);
+		  
+    		   
+    return status;
+}
+
+static pj_status_t transport_endpoint_attach2(pjmedia_transport *tp,
+				     pjmedia_transport_attach_param *param)
+{
+    transport_bundle_endpoint *endpoint = (transport_bundle_endpoint*) tp;
+
+	transport_attach2((pjmedia_transport*) endpoint->bundle, param);
+
+        
+    return PJ_SUCCESS;
+}
+
+static pj_status_t transport_endpoint_destroy  (pjmedia_transport *tp) {
+    struct transport_bundle_endpoint *endpoint = (struct transport_bundle_endpoint*) tp;
+   // pj_status_t status;
+    unsigned i;
+
+    PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+   
+    pj_lock_acquire(endpoint->bundle->mutex); 
+   
+    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+	    if(endpoint->bundle->endpoints[i] == endpoint) endpoint->bundle->endpoints[i] = NULL;
+	}
+	
+	endpoint->bundle = NULL;
+    
+    pj_lock_release(endpoint->bundle->mutex);
+
+    return PJ_SUCCESS;
+}
 
 
