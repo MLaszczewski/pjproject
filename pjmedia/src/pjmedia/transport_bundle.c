@@ -28,6 +28,7 @@
 #include <pj/log.h>
 #include <pj/os.h>
 #include <pj/pool.h>
+#include <pj/sock.h>
 
 #if 0
 #   define TRACE_(x)	PJ_LOG(3,x)
@@ -334,7 +335,7 @@ static void bundle_rtp_cb( void *user_data, void *pkt, pj_ssize_t size)
     int i;
     
     pjmedia_rtp_hdr* hdr = (pjmedia_rtp_hdr*)pkt;   
-    pj_uint32_t ssrc = htonl(hdr->ssrc);
+    pj_uint32_t ssrc = pj_htonl(hdr->ssrc);
     
     //fprintf(stderr,"Received RTP with size %zd and SSRC: %x -> %x\n",  size, hdr->ssrc, ssrc);
     
@@ -374,7 +375,7 @@ static void parse_rtcp_report(transport_bundle *bundle,
 		stream_commons[i] = NULL;
 	}
 	
-	uint32_t common_ssrc = htonl(common->ssrc);
+	uint32_t common_ssrc = pj_htonl(common->ssrc);
 	
 	if( common->pt == RTCP_SR) fprintf(stderr, "  type: SR\n");
 	if( common->pt == RTCP_RR) fprintf(stderr, "  type: RR\n");
@@ -404,7 +405,7 @@ static void parse_rtcp_report(transport_bundle *bundle,
 			p += sizeof(pjmedia_rtcp_rr);
 			more -= sizeof(pjmedia_rtcp_rr);	
 			
-			uint32_t ssrc = htonl(rr->ssrc);
+			uint32_t ssrc = pj_htonl(rr->ssrc);
 			
 			for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
 				transport_bundle_endpoint* stream = bundle->endpoints[i];
@@ -485,7 +486,7 @@ static void bundle_rtcp_cb( void *user_data, void *pkt, pj_ssize_t size)
     p_end = p + size;
     while (p < p_end) {
 		pjmedia_rtcp_common *common = (pjmedia_rtcp_common*)p;
-		uint32_t ssrc = htonl(common->ssrc);
+		uint32_t ssrc = pj_htonl(common->ssrc);
 		//fprintf(stderr,"  SSRC: %x\n",  ssrc);
 		unsigned len;		      
 
