@@ -191,6 +191,10 @@ static void usage(void)
     puts  ("  --turn-tcp          Use TCP connection to TURN server (default no)");
     puts  ("  --turn-user         TURN username");
     puts  ("  --turn-passwd       TURN password");
+#if defined(PJMEDIA_HAS_SRTP) && (PJMEDIA_HAS_SRTP != 0)
+    puts  ("  --srtp-keying       SRTP keying method for outgoing SDP offer.");
+    puts  ("                      0=SDES (default), 1=DTLS");
+#endif
 
     puts  ("");
     puts  ("Buddy List (can be more than one):");
@@ -267,9 +271,9 @@ static int read_config_file(pj_pool_t *pool, const char *filename,
 
 	// Trim ending newlines
 	len = strlen(line);
-	if (line[len-1]=='\n')
+	if (len > 0 && line[len-1]=='\n')
 	    line[--len] = '\0';
-	if (line[len-1]=='\r')
+	if (len > 0 && line[len-1]=='\r')
 	    line[--len] = '\0';
 
 	if (len==0) continue;
@@ -355,7 +359,7 @@ static pj_status_t parse_args(int argc, char *argv[],
 	   OPT_AUTO_CONF, OPT_CLOCK_RATE, OPT_SND_CLOCK_RATE, OPT_STEREO,
 	   OPT_USE_ICE, OPT_ICE_REGULAR, OPT_USE_SRTP, OPT_SRTP_SECURE,
 	   OPT_USE_TURN, OPT_ICE_MAX_HOSTS, OPT_ICE_NO_RTCP, OPT_TURN_SRV,
-	   OPT_TURN_TCP, OPT_TURN_USER, OPT_TURN_PASSWD,
+	   OPT_TURN_TCP, OPT_TURN_USER, OPT_TURN_PASSWD, OPT_SRTP_KEYING,
 	   OPT_PLAY_FILE, OPT_PLAY_TONE, OPT_RTP_PORT, OPT_ADD_CODEC,
 	   OPT_ILBC_MODE, OPT_REC_FILE, OPT_AUTO_REC,
 	   OPT_COMPLEXITY, OPT_QUALITY, OPT_PTIME, OPT_NO_VAD,
@@ -452,6 +456,7 @@ static pj_status_t parse_args(int argc, char *argv[],
 #if defined(PJMEDIA_HAS_SRTP) && (PJMEDIA_HAS_SRTP != 0)
 	{ "use-srtp",   1, 0, OPT_USE_SRTP},
 	{ "srtp-secure",1, 0, OPT_SRTP_SECURE},
+	{ "srtp-keying",1, 0, OPT_SRTP_KEYING},
 #endif
 	{ "add-codec",  1, 0, OPT_ADD_CODEC},
 	{ "dis-codec",  1, 0, OPT_DIS_CODEC},
@@ -820,11 +825,10 @@ static pj_status_t parse_args(int argc, char *argv[],
 	case OPT_USE_COMPACT_FORM:
 	    /* enable compact form - from Ticket #342 */
             {
-		extern pj_bool_t pjsip_use_compact_form;
 		extern pj_bool_t pjsip_include_allow_hdr_in_dlg;
 		extern pj_bool_t pjmedia_add_rtpmap_for_static_pt;
 
-		pjsip_use_compact_form = PJ_TRUE;
+		pjsip_cfg()->endpt.use_compact_form = PJ_TRUE;
 		/* do not transmit Allow header */
 		pjsip_include_allow_hdr_in_dlg = PJ_FALSE;
 		/* Do not include rtpmap for static payload types (<96) */
@@ -1041,6 +1045,15 @@ static pj_status_t parse_args(int argc, char *argv[],
 		return -1;
 	    }
 	    cur_acc->srtp_secure_signaling = app_config.cfg.srtp_secure_signaling;
+	    break;
+	case OPT_SRTP_KEYING:
+	    app_config.srtp_keying = my_atoi(pj_optarg);
+	    if (!pj_isdigit(*pj_optarg) || app_config.srtp_keying < 0 ||
+		app_config.srtp_keying > 1)
+	    {
+		PJ_LOG(1,(THIS_FILE, "Invalid value for --srtp-keying option"));
+		return -1;
+	    }
 	    break;
 #endif
 
@@ -1747,7 +1760,6 @@ int write_settings(pjsua_app_config *config, char *buf, pj_size_t max)
     unsigned i;
     pj_str_t cfg;
     char line[128];
-    extern pj_bool_t pjsip_use_compact_form;
 
     PJ_UNUSED_ARG(max);
 
@@ -1925,6 +1937,12 @@ int write_settings(pjsua_app_config *config, char *buf, pj_size_t max)
     {
 	pj_ansi_sprintf(line, "--srtp-secure %d\n",
 			app_config.cfg.srtp_secure_signaling);
+	pj_strcat2(&cfg, line);
+    }
+    if (app_config.srtp_keying >= 0 && app_config.srtp_keying <= 1)
+    {
+	pj_ansi_sprintf(line, "--srtp-keying %d\n",
+			app_config.srtp_keying);
 	pj_strcat2(&cfg, line);
     }
 #endif
@@ -2147,7 +2165,7 @@ int write_settings(pjsua_app_config *config, char *buf, pj_size_t max)
 	pj_strcat2(&cfg, "--norefersub\n");
     }
 
-    if (pjsip_use_compact_form)
+    if (pjsip_cfg()->endpt.use_compact_form)
     {
 	pj_strcat2(&cfg, "--use-compact-form\n");
     }

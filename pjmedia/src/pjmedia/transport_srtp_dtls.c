@@ -375,7 +375,11 @@ static pj_status_t ssl_create(dtls_srtp *ds)
     SSL_CTX *ctx;
     unsigned i;
     int mode, rc;
-        
+
+    /* Check if it is already instantiated */
+    if (ds->ossl_ssl)
+	return PJ_SUCCESS;
+
     /* Create DTLS context */
     ctx = SSL_CTX_new(DTLS_method());
     if (ctx == NULL) {
@@ -685,6 +689,11 @@ static pj_status_t ssl_handshake(dtls_srtp *ds)
 {
     pj_status_t status;
     int err;
+
+    /* Init DTLS (if not yet) */
+    status = ssl_create(ds);
+    if (status != PJ_SUCCESS)
+	return status;
 
     /* Check if handshake has been initiated or even completed */
     if (ds->nego_started || SSL_is_init_finished(ds->ossl_ssl))
@@ -1024,13 +1033,6 @@ static pj_status_t dtls_media_create( pjmedia_transport *tp,
 	}
     }
 
-    /* Init DTLS */
-    if (!ds->ossl_ssl) {
-	status = ssl_create(ds);
-	if (status != PJ_SUCCESS)
-	    goto on_return;
-    }
-
     /* Set remote cert fingerprint verification status to PJ_EPENDING */
     ds->rem_fprint_status = PJ_EPENDING;
 
@@ -1110,15 +1112,20 @@ static pj_status_t dtls_encode_sdp( pjmedia_transport *tp,
 	    ssl_destroy(ds);
 	    ds->nego_started = PJ_FALSE;
 	    ds->got_keys = PJ_FALSE;
-
-	    status = ssl_create(ds);
-	    if (status != PJ_SUCCESS)
-		goto on_return;
+	    ds->rem_fprint_status = PJ_EPENDING;
 	}
     }
 
-    /* Set media transport to UDP/TLS/RTP/SAVP */
-    m_loc->desc.transport = ID_TP_DTLS_SRTP;
+    /* Set media transport to UDP/TLS/RTP/SAVP if we are the offerer,
+     * otherwise just match it to the offer (currently we only accept
+     * UDP/TLS/RTP/SAVP in remote offer though).
+     */
+    if (ds->srtp->offerer_side) {
+	m_loc->desc.transport = ID_TP_DTLS_SRTP;
+    } else {
+	m_loc->desc.transport = 
+			    sdp_remote->media[media_index]->desc.transport;
+    }
 
     /* Add a=fingerprint attribute, fingerprint of our TLS certificate */
     {
@@ -1180,6 +1187,7 @@ static pj_status_t dtls_encode_sdp( pjmedia_transport *tp,
 				    &info, PJMEDIA_TRANSPORT_TYPE_ICE);
 	use_ice = ice_info && ice_info->comp_cnt;
 	if (!use_ice) {
+	    /* Start SSL nego */
 	    status = ssl_handshake(ds);
 	    if (status != PJ_SUCCESS)
 		goto on_return;
@@ -1233,10 +1241,7 @@ static pj_status_t dtls_media_start( pjmedia_transport *tp,
 	    ssl_destroy(ds);
 	    ds->nego_started = PJ_FALSE;
 	    ds->got_keys = PJ_FALSE;
-
-	    status = ssl_create(ds);
-	    if (status != PJ_SUCCESS)
-		goto on_return;
+	    ds->rem_fprint_status = PJ_EPENDING;
 	}
     } else {
 	/* As answerer */
@@ -1397,11 +1402,11 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_dtls_start_nego(
     PJ_ASSERT_RETURN(pj_sockaddr_has_addr(&param->rem_addr), PJ_EINVAL);
 
     /* Find DTLS keying and destroy any other keying. */
-    for (j = 0; j < srtp->keying_cnt; ++j) {
-	if (srtp->keying[j]->op == &dtls_op)
-	    ds = (dtls_srtp*)srtp->keying[j];
+    for (j = 0; j < srtp->all_keying_cnt; ++j) {
+	if (srtp->all_keying[j]->op == &dtls_op)
+	    ds = (dtls_srtp*)srtp->all_keying[j];
 	else
-	    pjmedia_transport_close(srtp->keying[j]);
+	    pjmedia_transport_close(srtp->all_keying[j]);
     }
 
     /* DTLS-SRTP is not enabled */
@@ -1411,7 +1416,7 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_dtls_start_nego(
     /* Set SRTP keying to DTLS-SRTP only */
     srtp->keying_cnt = 1;
     srtp->keying[0] = &ds->base;
-    srtp->keying_pending_cnt = 1;
+    srtp->keying_pending_cnt = 0;
 
     /* Apply param to DTLS-SRTP internal states */
     pj_strdup(ds->pool, &ds->rem_fingerprint, &param->rem_fingerprint);
@@ -1423,11 +1428,6 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_dtls_start_nego(
     /* Pending start SRTP */
     ds->pending_start = PJ_TRUE;
     srtp->keying_pending_cnt++;
-
-    /* Create SSL */
-    status = ssl_create(ds);
-    if (status != PJ_SUCCESS)
-	goto on_return;
 
     /* Attach member transport, so we can send/receive DTLS init packets */
     pj_bzero(&ap, sizeof(ap));

@@ -369,6 +369,7 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
     const pjmedia_sdp_conn *rem_conn;
     int rem_af, local_af;
     pj_sockaddr local_addr;
+    unsigned i;
     pj_status_t status;
 
 
@@ -381,7 +382,7 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
     local_m = local->media[stream_idx];
     rem_m = remote->media[stream_idx];
     
-      printf("STAR! %d %d\n", local_conn, rem_conn);
+     // printf("STAR! %d %d\n", local_conn, rem_conn);
 
     local_conn = local_m->conn ? local_m->conn : local->conn;
     if (local_conn == NULL)
@@ -392,7 +393,7 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
 	return PJMEDIA_SDP_EMISSINGCONN;
 
 
-    printf("QConn!\n");
+   // printf("QConn!\n");
 
     /* Media type must be audio */
     if (pj_stricmp(&local_m->desc.media, &ID_AUDIO) != 0)
@@ -410,7 +411,7 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
     si->rtcp_xr_enabled = PJ_TRUE;
 #endif
 
-    printf("QUATRO!\n");
+    //printf("QUATRO!\n");
 
     /* Media type: */
     si->type = PJMEDIA_TYPE_AUDIO;
@@ -584,6 +585,23 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
 	pj_sockaddr_set_port(&si->rem_rtcp, (pj_uint16_t)rtcp_port);
     }
 
+    /* Check if "ssrc" attribute is present in the SDP. */
+    for (i = 0; i < rem_m->attr_count; i++) {
+		if (pj_strcmp2(&rem_m->attr[i]->name, "ssrc") == 0) {
+			pjmedia_sdp_ssrc_attr ssrc;
+
+			status = pjmedia_sdp_attr_get_ssrc(
+					(const pjmedia_sdp_attr *)rem_m->attr[i], &ssrc);
+			if (status == PJ_SUCCESS) {
+				si->has_rem_ssrc = PJ_TRUE;
+				si->rem_ssrc = ssrc.ssrc;
+				if (ssrc.cname.slen > 0) {
+					pj_strdup(pool, &si->rem_cname, &ssrc.cname);
+					break;
+				}
+			}
+		}
+    }
 
     /* Get the payload number for receive channel. */
     /*
@@ -610,6 +628,24 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
 
     /* Leave SSRC to random. */
     si->ssrc = pj_rand();
+    
+        /* Check if "ssrc" attribute is present in the local SDP. */
+    for (i = 0; i < local_m->attr_count; i++) {
+		if (pj_strcmp2(&local_m->attr[i]->name, "ssrc") == 0) {
+			pjmedia_sdp_ssrc_attr ssrc;
+
+			status = pjmedia_sdp_attr_get_ssrc(
+					(const pjmedia_sdp_attr *)local_m->attr[i], &ssrc);
+			if (status == PJ_SUCCESS) {				
+				si->ssrc = ssrc.ssrc;
+				/*if (ssrc.cname.slen > 0) {
+					pj_strdup(pool, &si->cname, &ssrc.cname);
+					break;
+				}*/
+			}
+		}
+    }
+
 
     /* Set default jitter buffer parameter. */
     si->jb_init = si->jb_max = si->jb_min_pre = si->jb_max_pre = -1;
