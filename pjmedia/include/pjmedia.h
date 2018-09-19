@@ -69,6 +69,7 @@
 #include <pjmedia/transport_srtp.h>
 #include <pjmedia/transport_udp.h>
 #include <pjmedia/transport_mux.h>
+#include <pjmedia/transport_bundle.h>
 #include <pjmedia/vid_port.h>
 #include <pjmedia/vid_codec.h>
 #include <pjmedia/vid_stream.h>

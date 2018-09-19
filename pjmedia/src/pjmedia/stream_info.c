@@ -382,7 +382,7 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
     local_m = local->media[stream_idx];
     rem_m = remote->media[stream_idx];
     
-      printf("STAR! %d %d\n", local_conn, rem_conn);
+     // printf("STAR! %d %d\n", local_conn, rem_conn);
 
     local_conn = local_m->conn ? local_m->conn : local->conn;
     if (local_conn == NULL)
@@ -393,7 +393,7 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
 	return PJMEDIA_SDP_EMISSINGCONN;
 
 
-    printf("QConn!\n");
+   // printf("QConn!\n");
 
     /* Media type must be audio */
     if (pj_stricmp(&local_m->desc.media, &ID_AUDIO) != 0)
@@ -411,7 +411,7 @@ PJ_DEF(pj_status_t) pjmedia_stream_info_from_sdp(
     si->rtcp_xr_enabled = PJ_TRUE;
 #endif
 
-    printf("QUATRO!\n");
+    //printf("QUATRO!\n");
 
     /* Media type: */
     si->type = PJMEDIA_TYPE_AUDIO;

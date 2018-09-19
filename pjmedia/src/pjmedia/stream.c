@@ -2430,6 +2430,8 @@ PJ_DEF(pj_status_t) pjmedia_stream_create( pjmedia_endpt *endpt,
     att_param.rtp_cb = &on_rx_rtp;
     att_param.rtcp_cb = &on_rx_rtcp;
 
+   //fprintf(stderr, "TP=%zx\n?", (int)tp);
+
     /* Only attach transport when stream is ready. */
     status = pjmedia_transport_attach2(tp, &att_param);
     if (status != PJ_SUCCESS)

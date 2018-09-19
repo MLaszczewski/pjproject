@@ -44,9 +44,6 @@ typedef struct transport_bundle transport_bundle;
 typedef struct transport_bundle_endpoint
 {
     pjmedia_transport	 base;		    /**< Base transport interface.  */
-    
-    pj_uint32_t ssrc;
-    pj_uint32_t rem_ssrc;    
 
     /* Stream information */
     void		*user_data;
@@ -59,6 +56,9 @@ typedef struct transport_bundle_endpoint
 
     /* Transport information */
     transport_bundle	*bundle; /**< Underlying transport.       */
+    
+    pj_uint32_t ssrc;
+    pj_uint32_t rem_ssrc;    
     
     char rtcp_buffer[RTCP_BUFFER_SIZE];
     int rtcp_buffer_position;
@@ -255,6 +255,8 @@ PJ_DEF(pj_status_t) pjmedia_transport_bundle_create(
 
     /* Set underlying transport */
     bundle->member_tp = tp;
+    
+    bundle->member_tp_attached = PJ_FALSE; 
 
     /* Done */
     *p_tp = &bundle->base;
@@ -332,11 +334,14 @@ static void bundle_rtp_cb( void *user_data, void *pkt, pj_ssize_t size)
     int i;
     
     pjmedia_rtp_hdr* hdr = (pjmedia_rtp_hdr*)pkt;   
-    pj_uint32_t ssrc = hdr->ssrc;
+    pj_uint32_t ssrc = htonl(hdr->ssrc);
+    
+    //fprintf(stderr,"Received RTP with size %zd and SSRC: %x -> %x\n",  size, hdr->ssrc, ssrc);
     
     for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
 		transport_bundle_endpoint* stream = bundle->endpoints[i];
 		if(!stream) continue;
+		//fprintf(stderr,"Candidate stream SSRCs: %x <-> %x\n",  stream->ssrc, stream->rem_ssrc);
 		if((stream->ssrc == ssrc || stream->rem_ssrc == ssrc) && stream->rtp_cb) stream->rtp_cb(stream->user_data, pkt, size);
 	}
   
@@ -368,8 +373,13 @@ static void parse_rtcp_report(transport_bundle *bundle,
     for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
 		stream_commons[i] = NULL;
 	}
+	
+	uint32_t common_ssrc = htonl(common->ssrc);
+	
+	if( common->pt == RTCP_SR) fprintf(stderr, "  type: SR\n");
+	if( common->pt == RTCP_RR) fprintf(stderr, "  type: RR\n");
     
-    if (common->pt == RTCP_SR) {	
+    if (common->pt == RTCP_SR) {		
 		//sr = (pjmedia_rtcp_sr*) p;		
 		p += sizeof(pjmedia_rtcp_sr);
 		more -= sizeof(pjmedia_rtcp_sr);
@@ -377,7 +387,7 @@ static void parse_rtcp_report(transport_bundle *bundle,
 	    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
 			transport_bundle_endpoint* stream = bundle->endpoints[i];
 			if(!stream) continue;
-			if(stream->ssrc == common->ssrc || stream->rem_ssrc == common->ssrc) {
+			if(stream->ssrc == common_ssrc || stream->rem_ssrc == common_ssrc) {
 				if(!stream->rtcp_cb) continue;
 				stream_commons[i] = (pjmedia_rtcp_common*)(stream->rtcp_buffer + stream->rtcp_buffer_position);
 				if(stream->rtcp_buffer_position + sizeof(pjmedia_rtcp_common) + sizeof(pjmedia_rtcp_sr) > RTCP_BUFFER_SIZE) continue;
@@ -394,10 +404,12 @@ static void parse_rtcp_report(transport_bundle *bundle,
 			p += sizeof(pjmedia_rtcp_rr);
 			more -= sizeof(pjmedia_rtcp_rr);	
 			
+			uint32_t ssrc = htonl(rr->ssrc);
+			
 			for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
 				transport_bundle_endpoint* stream = bundle->endpoints[i];
 				if(!stream) continue;
-				if(stream->ssrc == rr->ssrc || stream->rem_ssrc == rr->ssrc) {
+				if(stream->ssrc == ssrc || stream->rem_ssrc == ssrc) {
 					if(!stream->rtcp_cb) continue;
 					if(!stream_commons[i]) {
 						if(stream->rtcp_buffer_position + sizeof(pjmedia_rtcp_common) + sizeof(pjmedia_rtcp_rr) > RTCP_BUFFER_SIZE) continue;
@@ -417,7 +429,7 @@ static void parse_rtcp_sdes( transport_bundle *bundle,
 			       const void *pkt,
 			       pj_size_t size) {
 	int i;
-    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) if(bundle->endpoints[i]) {
 	    transport_bundle_endpoint* stream = bundle->endpoints[i];
 		if(stream->rtcp_buffer_position + size > RTCP_BUFFER_SIZE) continue;
 		memcpy(stream->rtcp_buffer + stream->rtcp_buffer_position, pkt, size);
@@ -429,7 +441,7 @@ static void parse_rtcp_bye( transport_bundle *bundle,
 			       const void *pkt,
 			       pj_size_t size) {
 	int i;
-	for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+	for(i = 0; i < MAX_BUNDLE_STREAMS; i++) if(bundle->endpoints[i]) {
 	    transport_bundle_endpoint* stream = bundle->endpoints[i];
 		if(stream->rtcp_buffer_position + size > RTCP_BUFFER_SIZE) continue;
 		memcpy(stream->rtcp_buffer + stream->rtcp_buffer_position, pkt, size);
@@ -441,7 +453,7 @@ static void parse_rtcp_fb( transport_bundle *bundle,
 			       const void *pkt,
 			       pj_size_t size) {
 	int i;
-	for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+	for(i = 0; i < MAX_BUNDLE_STREAMS; i++) if(bundle->endpoints[i]) {
 	    transport_bundle_endpoint* stream = bundle->endpoints[i];
 		if(stream->rtcp_buffer_position + size > RTCP_BUFFER_SIZE) continue;
 		memcpy(stream->rtcp_buffer + stream->rtcp_buffer_position, pkt, size);
@@ -458,9 +470,11 @@ static void bundle_rtcp_cb( void *user_data, void *pkt, pj_ssize_t size)
     transport_bundle *bundle = (transport_bundle *) user_data;   
     int i;
     
+    fprintf(stderr,"Received RTCP with size: %zd\n", size);
+    
     pj_lock_acquire(bundle->mutex);
     
-    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
+    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) if(bundle->endpoints[i]) {	
 		transport_bundle_endpoint* stream = bundle->endpoints[i];
 		stream->rtcp_buffer_position = 0;
 	}
@@ -471,7 +485,9 @@ static void bundle_rtcp_cb( void *user_data, void *pkt, pj_ssize_t size)
     p_end = p + size;
     while (p < p_end) {
 		pjmedia_rtcp_common *common = (pjmedia_rtcp_common*)p;
-		unsigned len;
+		uint32_t ssrc = htonl(common->ssrc);
+		//fprintf(stderr,"  SSRC: %x\n",  ssrc);
+		unsigned len;		      
 
 		len = (pj_ntohs((pj_uint16_t)common->length)+1) * 4;
 		switch(common->pt) {
@@ -500,9 +516,10 @@ static void bundle_rtcp_cb( void *user_data, void *pkt, pj_ssize_t size)
 		p += len;
     }
     
-    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
-		transport_bundle_endpoint* stream = bundle->endpoints[i];		
+    for(i = 0; i < MAX_BUNDLE_STREAMS; i++) if(bundle->endpoints[i]) {
+		transport_bundle_endpoint* stream = bundle->endpoints[i];
 		if(stream->rtcp_buffer_position > 0) {
+			fprintf(stderr,"  RTCP DELIVERED TO: %x <-> %x\n",  bundle->endpoints[i]->ssrc, bundle->endpoints[i]->rem_ssrc);
 			stream->rtcp_cb(stream->user_data, stream->rtcp_buffer, stream->rtcp_buffer_position);
 		}
     }
@@ -534,26 +551,33 @@ PJ_DECL(pj_status_t) pjmedia_transport_bundle_endpoint_create(
     
     endpoint->rtcp_buffer_position = 0;
     
+    endpoint->ssrc = ssrc;
+    endpoint->rem_ssrc = rem_ssrc;
+    fprintf(stdout, "CREATE ENDPOINT FOR SSRCs %x <-> %x\n", ssrc, rem_ssrc);
+        
     pj_lock_acquire(bundle->mutex);
     
     for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
 		if(bundle->endpoints[i] == NULL) {
 			bundle->endpoints[i] = endpoint;
+			break;
 		}
 	}
 	
 	PJ_ASSERT_RETURN( i < MAX_BUNDLE_STREAMS, PJ_EINVAL);
 
     /* Initialize base pjmedia_transport */
-    pj_memcpy(endpoint->base.name, pool->obj_name, PJ_MAX_OBJ_NAME);
+    pj_memcpy(endpoint->base.name, ID_BUNDLE_ENDPOINT.ptr, ID_BUNDLE_ENDPOINT.slen + 1);
     if (tp)
 	  endpoint->base.type = tp->type;
     else
 	  endpoint->base.type = PJMEDIA_TRANSPORT_TYPE_UDP;
-    bundle->base.op = &transport_bundle_endpoint_op;
+    endpoint->base.op = &transport_bundle_endpoint_op;
 
     /* Done */
-    *p_tpe = &bundle->base;
+    *p_tpe = &endpoint->base;
+    
+    fprintf(stdout, "CREATED ENDPOINT FOR SSRCs %x <-> %x\n", (uint32_t)endpoint, endpoint->ssrc, endpoint->rem_ssrc);
     
     pj_lock_release(bundle->mutex);
 
@@ -666,7 +690,9 @@ static pj_status_t transport_attach2(pjmedia_transport *tp,
 
     PJ_ASSERT_RETURN(tp, PJ_EINVAL);
 
-    if(!bundle->member_tp_attached) return PJ_SUCCESS;
+    if(bundle->member_tp_attached) return PJ_SUCCESS;
+    
+    fprintf(stderr, "BUNDLE ATTACH2!\n");
     
     /* Attach self to member transport */
     member_param = *param;
@@ -810,8 +836,13 @@ static pj_status_t transport_endpoint_attach2(pjmedia_transport *tp,
 {
     transport_bundle_endpoint *endpoint = (transport_bundle_endpoint*) tp;
 
+    fprintf(stderr, "ENDPOINT ATTACH2!\n");
+    
+    endpoint->user_data = param->user_data;
+    endpoint->rtp_cb = param->rtp_cb;
+    endpoint->rtcp_cb = param->rtcp_cb;
+    
 	transport_attach2((pjmedia_transport*) endpoint->bundle, param);
-
         
     return PJ_SUCCESS;
 }
