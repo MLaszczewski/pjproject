@@ -578,7 +578,7 @@ PJ_DECL(pj_status_t) pjmedia_transport_bundle_endpoint_create(
     /* Done */
     *p_tpe = &endpoint->base;
     
-    fprintf(stdout, "CREATED ENDPOINT FOR SSRCs %x <-> %x\n", (uint32_t)endpoint, endpoint->ssrc, endpoint->rem_ssrc);
+    fprintf(stdout, "CREATED ENDPOINT FOR SSRCs %x <-> %x\n", endpoint->ssrc, endpoint->rem_ssrc);
     
     pj_lock_release(bundle->mutex);
 
