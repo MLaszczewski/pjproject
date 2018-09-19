@@ -399,7 +399,7 @@ static void parse_rtcp_report(transport_bundle *bundle,
     } 
     
     if (common->pt == RTCP_RR || common->pt == RTCP_SR) {
-		for(int i = 0 ; i < common->count; i++) {
+		for(i = 0 ; i < common->count; i++) {
 			if(more < sizeof(pjmedia_rtcp_rr)) break;
 			rr = (pjmedia_rtcp_rr*) p;
 			p += sizeof(pjmedia_rtcp_rr);
