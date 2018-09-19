@@ -337,7 +337,7 @@ static void bundle_rtp_cb( void *user_data, void *pkt, pj_ssize_t size)
     pjmedia_rtp_hdr* hdr = (pjmedia_rtp_hdr*)pkt;   
     pj_uint32_t ssrc = pj_htonl(hdr->ssrc);
     
-    //fprintf(stderr,"Received RTP with size %zd and SSRC: %x -> %x\n",  size, hdr->ssrc, ssrc);
+    //fprintf(stderr,"Received RTP with size %d and SSRC: %x -> %x\n",  (int)size, hdr->ssrc, ssrc);
     
     for(i = 0; i < MAX_BUNDLE_STREAMS; i++) {
 		transport_bundle_endpoint* stream = bundle->endpoints[i];
@@ -471,7 +471,7 @@ static void bundle_rtcp_cb( void *user_data, void *pkt, pj_ssize_t size)
     transport_bundle *bundle = (transport_bundle *) user_data;   
     int i;
     
-    fprintf(stderr,"Received RTCP with size: %zd\n", size);
+    fprintf(stderr,"Received RTCP with size: %d\n", (int)size);
     
     pj_lock_acquire(bundle->mutex);
     
